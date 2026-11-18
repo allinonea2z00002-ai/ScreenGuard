@@ -15,7 +15,7 @@ jobs:
           cp AndroidManifest.xml app/src/main/AndroidManifest.xml
           cp guard_config.xml app/src/main/res/xml/guard_config.xml
           cp strings.xml app/src/main/res/values/strings.xml
-          cp GuardService.kt MainActivity.kt app/src/main/java/com/example/screenguard/
+          cp GuardService.kt MainActivity.kt Store.kt app/src/main/java/com/example/screenguard/
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
