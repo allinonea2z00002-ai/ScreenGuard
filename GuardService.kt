@@ -7,15 +7,11 @@ import android.widget.Toast
 
 class GuardService : AccessibilityService() {
 
-    // এখানে নিজের শব্দ যোগ করুন
-    private val words = listOf(
-        "choti golpo", "choti", "porn", "xxx", "xnxx", "xvideos", "nude",
-        "চটি", "পর্ন", "যৌন গল্প", "সেক্স"
-    )
     private var last = 0L
 
     override fun onAccessibilityEvent(e: AccessibilityEvent?) {
         if (e == null || e.packageName == packageName) return
+        if (!Store.enabled(this)) return
         val now = System.currentTimeMillis()
         if (now - last < 2000) return
 
@@ -24,7 +20,10 @@ class GuardService : AccessibilityService() {
         collect(root, sb)
         val text = norm(sb.toString())
 
-        if (words.any { text.contains(norm(it)) }) {
+        // আপনার নিজের ট্যাগ লিস্ট থেকে শব্দ নেওয়া হয়
+        val tags = Store.words(this).map { norm(it) }.filter { it.isNotEmpty() }
+
+        if (tags.any { text.contains(it) }) {
             last = now
             performGlobalAction(GLOBAL_ACTION_HOME)
             Toast.makeText(this, "এটা ব্লক করা হয়েছে", Toast.LENGTH_SHORT).show()

@@ -1,4 +1,2 @@
-সব ফাইল রিপোর রুটে আপলোড করুন (কোনো ফোল্ডার ছাড়া)।
-শুধু একটা ফাইল GitHub-এ Create new file দিয়ে বানাতে হবে:
-নাম: .github/workflows/build.yml
-লেখা: build.yml.txt ফাইলের পুরোটা কপি-পেস্ট।
+সব ফাইল রিপোর রুটে আপলোড করুন (পুরনো GuardService.kt ও MainActivity.kt বদলে দিন, নতুন Store.kt যোগ হবে)।
+.github/workflows/build.yml এর লেখা বদলে build.yml.txt এর নতুন লেখা পেস্ট করুন (এখানে cp *.kt আছে)।
