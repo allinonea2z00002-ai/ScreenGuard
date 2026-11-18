@@ -8,6 +8,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Arrange files
+        run: |
+          mkdir -p app/src/main/res/xml app/src/main/res/values app/src/main/java/com/example/screenguard
+          cp app_build.gradle app/build.gradle
+          cp AndroidManifest.xml app/src/main/AndroidManifest.xml
+          cp guard_config.xml app/src/main/res/xml/guard_config.xml
+          cp strings.xml app/src/main/res/values/strings.xml
+          cp GuardService.kt MainActivity.kt app/src/main/java/com/example/screenguard/
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
