@@ -4,35 +4,57 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
 import android.view.Gravity
+import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
+
+// ব্লক পর্দা: Back চাপলে এই ভিউ থেকে সংকেত যায়
+private class Cover(c: Context, val onBack: () -> Unit) : FrameLayout(c) {
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_UP) onBack()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+}
 
 class GuardService : AccessibilityService() {
 
-    private var last = 0L
-    private var lastPkg = ""
-    private var lastTs = 0L
+    companion object {
+        @Volatile var instance: GuardService? = null
+    }
+
+    @Volatile private var overlay: View? = null
+    val blocking: Boolean get() = overlay != null
+
+    private var lastScan = 0L
+    private var ignoreUntil = 0L
     private var reel = false
-    private val hits = mutableListOf<Long>()
-    private val cool = mutableMapOf<String, Long>()
-    private var overlay: TextView? = null
     private val h = Handler(Looper.getMainLooper())
 
-    // রিলস/শর্টস ধরার চেষ্টা (পরীক্ষামূলক, অ্যাপ আপডেটে বদলে যেতে পারে)
+    // রিলস/শর্টস ধরার চেষ্টা (পরীক্ষামূলক, অ্যাপ আপডেটে বদলাতে পারে)
     private val reelPkgs = setOf(
         "com.google.android.youtube", "com.facebook.katana", "com.instagram.android"
     )
-    private val reelIds = listOf("reel_player", "shorts_player", "reels_viewer", "clips_viewer")
+    private val reelIds = listOf(
+        "reel_player", "reel_recycler", "shorts_player", "reels_viewer", "clips_viewer"
+    )
+    private val reelUrls = listOf("youtube.com/shorts", "/reels/", "/reel/")
+    private val tiktok = setOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
 
     private val quotes = listOf(
         "একটা গভীর শ্বাস নাও। এই মুহূর্তটা পেরিয়ে গেলেই সহজ হয়ে যাবে।",
@@ -41,149 +63,168 @@ class GuardService : AccessibilityService() {
         "উঠে হাঁটো, পানি খাও, অন্য কিছু করো।"
     )
 
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+        Notif.update(this)
+    }
+
     override fun onAccessibilityEvent(e: AccessibilityEvent?) {
         if (e == null) return
         val pkg = e.packageName?.toString() ?: return
         if (pkg == packageName) return
-        if (!Store.enabled(this)) return
+        if (overlay != null || !Store.enabled(this)) return
         val now = System.currentTimeMillis()
+        if (now < ignoreUntil || now - lastScan < 600) return
+        lastScan = now
 
-        trackUsage(pkg, now)
-        if (now - last < 2500) return
-
-        var reason: String? = null
-        if (Store.apps(this, "A").contains(pkg)) {
-            reason = "app"
-        } else if (Store.apps(this, "B").contains(pkg) &&
-            (Store.nightNow(this) || Store.overLimit(this))) {
-            reason = "limit"
-        } else if ((cool[pkg] ?: 0L) > now) {
-            reason = "cool"
-        } else {
-            val root = rootInActiveWindow
-            if (root != null) {
-                reel = false
-                val sb = StringBuilder()
-                collect(root, sb, root.packageName?.toString() ?: pkg)
-                if (Store.reelOn(this) && reel) {
-                    reason = "reel"
-                } else {
-                    var text = norm(sb.toString())
-                    // ছাড়ের শব্দ আগে বাদ দিয়ে নেওয়া
-                    for (w in Store.whitelist(this).map { norm(it) }.filter { it.isNotEmpty() }) {
-                        text = text.replace(w, " ")
-                    }
-                    val tags = Store.tags(this)
-                        .filter { Store.catOn(this, it.first) }
-                        .map { norm(it.second) }.filter { it.isNotEmpty() }
-                    if (tags.any { text.contains(it) }) reason = "text"
-                }
-            }
+        // টিকটক = পুরোটাই শর্ট ভিডিও
+        if (Store.reelOn(this) && tiktok.contains(pkg)) {
+            trigger()
+            return
         }
-        if (reason != null) block(pkg, reason, now)
-    }
 
-    // সীমিত অ্যাপে কত সময় কাটছে (আনুমানিক)
-    private fun trackUsage(pkg: String, now: Long) {
-        if (pkg == lastPkg && now - lastTs in 1..30000 && Store.apps(this, "B").contains(pkg)) {
-            Store.addUsage(this, now - lastTs)
-        }
-        lastPkg = pkg
-        lastTs = now
-    }
+        val root = rootInActiveWindow ?: return
+        reel = false
+        val sb = StringBuilder()
+        collect(root, sb, root.packageName?.toString() ?: pkg)
+        val raw = sb.toString()
 
-    private fun block(pkg: String, reason: String, now: Long) {
-        last = now
-        Store.addBlock(this)
-        vibrate()
-
-        val textual = reason == "text" || reason == "reel"
-        if (textual) {
-            // ১০ মিনিটে ৩ বার ধরা পড়লে ওই অ্যাপ ১০ মিনিটের জন্য বন্ধ
-            hits.add(now)
-            hits.removeAll { now - it > 600000L }
-            if (hits.size >= 3) {
-                cool[pkg] = now + 600000L
-                hits.clear()
-                toast("৩ বার ধরা পড়েছে, এই অ্যাপ ১০ মিনিট বন্ধ")
+        if (Store.reelOn(this)) {
+            val low = raw.lowercase()
+            if (reel || reelUrls.any { low.contains(it) }) {
+                trigger()
+                return
             }
         }
 
-        var mode = Store.mode(this)
-        if (!textual && (mode == 2 || mode == 4)) mode = 1
-
-        when (mode) {
-            0 -> { showOverlay(); performGlobalAction(GLOBAL_ACTION_HOME) }
-            1 -> performGlobalAction(GLOBAL_ACTION_HOME)
-            2 -> performGlobalAction(GLOBAL_ACTION_BACK)
-            3 -> {
-                if (Build.VERSION.SDK_INT >= 28) performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
-                else performGlobalAction(GLOBAL_ACTION_HOME)
+        if (Store.txtOn(this)) {
+            var text = norm(raw)
+            for (w in Store.white(this).map { norm(it) }.filter { it.isNotEmpty() }) {
+                text = text.replace(w, " ")
             }
-            else -> toast("সতর্কতা: এটা দেখা ঠিক হচ্ছে না")
-        }
-
-        if (mode != 0 && mode != 4) {
-            toast(
-                when (reason) {
-                    "app" -> "এই অ্যাপ ব্লক করা আছে"
-                    "limit" -> "রাতের মোড বা আজকের সময় শেষ"
-                    "cool" -> "কুলডাউন চলছে"
-                    else -> "এটা ব্লক করা হয়েছে"
-                }
-            )
+            val tags = Store.words(this).map { norm(it) }.filter { it.isNotEmpty() }
+            if (tags.any { text.contains(it) }) trigger()
         }
     }
 
-    // ফুল স্ক্রিন পর্দা (অতিরিক্ত permission লাগে না)
-    private fun showOverlay() {
-        if (overlay != null) return
+    // যেকোনো থ্রেড থেকে ডাকা যায় (ছবি/ভিডিও ডিটেকশনও এটাই ডাকে)
+    fun trigger() {
+        h.post {
+            if (overlay != null || !Store.enabled(this)) return@post
+            if (System.currentTimeMillis() < ignoreUntil) return@post
+            Store.addBlock(this)
+            Notif.update(this)
+            showCover()
+        }
+    }
+
+    private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
+
+    private fun showCover() {
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val tv = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 22f
+        val blur = Store.style(this) == 1
+        val cover = Cover(this) { dismiss() }
+        cover.setBackgroundColor(
+            if (!blur) Color.parseColor("#0B1020")
+            else if (Build.VERSION.SDK_INT >= 31) Color.parseColor("#B30B1020")
+            else Color.parseColor("#F20B1020")
+        )
+
+        fun label(t: String, size: Float, color: Int, bold: Boolean) = TextView(this).apply {
+            text = t
+            textSize = size
+            setTextColor(color)
             gravity = Gravity.CENTER
-            setBackgroundColor(Color.parseColor("#102030"))
-            setPadding(60, 60, 60, 60)
+            if (bold) typeface = Typeface.DEFAULT_BOLD
         }
+
+        fun lpTop(n: Int) = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(n) }
+
+        val logo = ImageView(this).apply {
+            setImageResource(R.drawable.ic_shield)
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#6366F1"))
+            }
+        }
+
+        val back = TextView(this).apply {
+            text = "← ফিরে যান"
+            textSize = 17f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(Color.parseColor("#6366F1"))
+            }
+            setPadding(dp(40), dp(14), dp(40), dp(14))
+            setOnClickListener { dismiss() }
+        }
+
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(32), dp(32), dp(32), dp(32))
+            addView(logo, LinearLayout.LayoutParams(dp(104), dp(104)))
+            addView(label("এটা এখন ব্লক করা হয়েছে", 26f, Color.WHITE, true), lpTop(28))
+            addView(label(quotes.random(), 16f, Color.parseColor("#B8C0E0"), false), lpTop(12))
+            addView(back, lpTop(36))
+            addView(label("অথবা Back বাটন চাপুন", 13f, Color.parseColor("#8A93B2"), false), lpTop(14))
+        }
+        cover.addView(
+            col,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.OPAQUE
+            if (blur) PixelFormat.TRANSLUCENT else PixelFormat.OPAQUE
         )
-        try { wm.addView(tv, lp) } catch (ex: Exception) { return }
-        overlay = tv
-
-        val msg = quotes.random()
-        var n = 5
-        val tick = object : Runnable {
-            override fun run() {
-                if (n <= 0) {
-                    try { wm.removeView(tv) } catch (ex: Exception) {}
-                    overlay = null
-                    return
-                }
-                tv.text = "এটা এখন ব্লক করা হয়েছে\n\n$msg\n\n$n"
-                n--
-                h.postDelayed(this, 1000)
-            }
+        if (blur && Build.VERSION.SDK_INT >= 31) {
+            lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+            lp.blurBehindRadius = 90
         }
-        h.post(tick)
-    }
-
-    private fun vibrate() {
         try {
-            val v = if (Build.VERSION.SDK_INT >= 31)
-                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
-            else getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-            v.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE))
-        } catch (ex: Exception) {}
+            wm.addView(cover, lp)
+        } catch (ex: Exception) {
+            return
+        }
+        overlay = cover
+        cover.isFocusable = true
+        cover.isFocusableInTouchMode = true
+        cover.requestFocus()
     }
 
-    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+    // Back চাপলে পর্দা সরে যায় এবং আগের পেজে ফেরা হয়
+    private fun dismiss() {
+        val o = overlay ?: return
+        overlay = null
+        try {
+            (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(o)
+        } catch (ex: Exception) {}
+        ignoreUntil = System.currentTimeMillis() + 1500
+        performGlobalAction(GLOBAL_ACTION_BACK)
+    }
+
+    // ফোনের Back বাটনের চাপ ধরা (পর্দা থাকাকালীন)
+    override fun onKeyEvent(event: KeyEvent?): Boolean {
+        if (event != null && overlay != null && event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_UP) h.post { dismiss() }
+            return true
+        }
+        return false
+    }
 
     private fun collect(n: AccessibilityNodeInfo?, sb: StringBuilder, pkg: String) {
         if (n == null) return
@@ -204,13 +245,22 @@ class GuardService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        instance = null
+        Notif.cancel(this)
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
-        super.onDestroy()
+        instance = null
         h.removeCallbacksAndMessages(null)
         val o = overlay
         if (o != null) {
-            try { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(o) } catch (ex: Exception) {}
+            try {
+                (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(o)
+            } catch (ex: Exception) {}
             overlay = null
         }
+        super.onDestroy()
     }
 }

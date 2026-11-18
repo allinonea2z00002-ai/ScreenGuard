@@ -11,12 +11,17 @@ android {
         applicationId "com.example.screenguard"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 4
+        versionName "4.0"
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = '17' }
+}
+
+dependencies {
+    // ছবি/ভিডিও AI চেকের জন্য (ফোনের ভেতরেই চলে)
+    implementation 'org.tensorflow:tensorflow-lite:2.14.0'
 }
